@@ -1,49 +1,73 @@
 #!/usr/bin/python3
-
 from scapy.all import *
 import sys
-import numpy as np
+import math
 
-# Ensure the HTTP layer is loaded
+# Make sure to load the HTTP layer
 load_layer("http")
 
-# Function to calculate percentiles
 def calculate_percentiles(latencies):
-    return np.percentile(latencies, [25, 50, 75, 95, 99])
+    latencies.sort()
+    count = len(latencies)
+    percentiles = [
+        latencies[int(count * 0.25)],
+        latencies[int(count * 0.50)],
+        latencies[int(count * 0.75)],
+        latencies[int(count * 0.95)],
+        latencies[int(count * 0.99)],
+    ]
+    return percentiles
 
-# Main function to process pcap file
-def process_pcap(file_name, server_ip, server_port):
+def process_packets(pcap_filename, server_ip, server_port):
+    number_of_packets_total = 0
+    number_of_tcp_packets = 0
+    http_requests = {}
+
+    processed_file = rdpcap(pcap_filename)  # read in the pcap file
     latencies = []
 
-    # Read pcap file
-    packets = rdpcap(file_name)
-    
-    # Filter HTTP packets
-    for pkt in packets:
-        if pkt.haslayer(TCP) and pkt.haslayer(IP):
-            if pkt[IP].dst == server_ip and pkt[TCP].dport == server_port:
-                if pkt.haslayer(HTTPRequest):
-                    # Record request time
-                    req_time = pkt.time
-                elif pkt.haslayer(HTTPResponse):
-                    # Record response time and calculate latency
-                    resp_time = pkt.time
-                    latencies.append(resp_time - req_time)
+    for packet in processed_file:
+        number_of_packets_total += 1
 
-    # Calculate average latency and percentiles
-    avg_latency = np.mean(latencies)
-    percentiles = calculate_percentiles(latencies)
+        if packet.haslayer(TCP):  # check if the packet is a TCP packet
+            number_of_tcp_packets += 1
 
-    return avg_latency, percentiles
+            source_ip = packet[IP].src
+            dest_ip = packet[IP].dst
+            dest_port = packet[TCP].dport
 
-# Main execution
-if __name__ == "_main_":
-    if len(sys.argv) != 4:
-        print("Usage: measure-webserver.py <input-file> <server-ip> <server-port>")
-        sys.exit(1)
+            if packet.haslayer(HTTP):  # test for an HTTP packet
+                if HTTPRequest in packet:
+                    # HTTP Request
+                    key = (source_ip, packet[TCP].sport)
+                    http_requests[key] = packet.time
+                elif HTTPResponse in packet:
+                    # HTTP Response
+                    key = (dest_ip, dest_port)
+                    if key in http_requests:
+                        # Calculate round-trip latency
+                        latency = packet.time - http_requests[key]
+                        latencies.append(latency)
 
-    input_file, server_ip, server_port = sys.argv[1], sys.argv[2], int(sys.argv[3])
-    avg_latency, percentiles = process_pcap(input_file, server_ip, server_port)
+                        # Remove matched request
+                        del http_requests[key]
 
-    print(f"AVERAGE LATENCY: {avg_latency:.5f}")
-    print(f"PERCENTILES: {percentiles[0]:.5f} {percentiles[1]:.5f} {percentiles[2]:.5f} {percentiles[3]:.5f} {percentiles[4]:.5f}")
+    return latencies
+
+if len(sys.argv) != 4:
+    print("Usage: measure-webserver.py <input-file> <server-ip> <server-port>")
+    sys.exit(1)
+
+pcap_filename, server_ip, server_port = sys.argv[1:4]
+
+latencies = process_packets(pcap_filename, server_ip, int(server_port))
+
+if len(latencies) == 0:
+    print("No HTTP request-response pairs found in the pcap file.")
+    sys.exit(1)
+
+average_latency = sum(latencies) / len(latencies)
+percentiles = calculate_percentiles(latencies)
+
+print("AVERAGE LATENCY: {:.5f}".format(average_latency))
+print("PERCENTILES: {:.5f} {:.5f} {:.5f} {:.5f} {:.5f}".format(*percentiles))
